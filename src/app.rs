@@ -5,9 +5,8 @@ use crate::win::overlay::Overlay;
 use crate::win::passive::{AppGroup, Passive};
 use crate::win::reclaim::{self, Reclaim, State};
 use crate::win::{drag, focus, geom, noactivate};
-use crate::{fonts, icon, window};
+use crate::{fonts, window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 
@@ -29,7 +28,6 @@ pub struct KeenPin {
     want_locked: bool,
     actually_locked: bool,
     visible: bool,
-    icon_state: Option<bool>,
     keep_title: String,
     last_external: Option<(isize, String)>,
     groups: Vec<AppGroup>,
@@ -59,7 +57,6 @@ impl KeenPin {
             want_locked: false,
             actually_locked: false,
             visible: true,
-            icon_state: None,
             keep_title: String::new(),
             last_external: None,
             groups: Vec::new(),
@@ -244,7 +241,7 @@ impl KeenPin {
 
         let row1 = ui.horizontal(|ui| {
             ui.add_space(1.0);
-            ui.colored_label(color, egui::RichText::new("\u{25CF}").size(12.0));
+            dot(ui, color);
             ui.label(L::head(
                 if self.actually_locked {
                     "LOCKED"
@@ -284,7 +281,7 @@ impl KeenPin {
                         .as_ref()
                         .map(|(_, t)| trim(t, 24))
                         .unwrap_or_else(|| "없음".to_owned());
-                    ui.label(L::sub(format!("고정 대상 \u{2192} {pending}")));
+                    ui.label(L::sub(format!("고정 대상: {pending}")));
                 } else {
                     ui.label(
                         egui::RichText::new(trim(&self.keep_title, 30))
@@ -296,7 +293,7 @@ impl KeenPin {
                     ui.label(L::sub(self.passive_summary()));
                     if self.reclaim.hits > 0 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(L::sub(format!("\u{21BA} {}", self.reclaim.hits)));
+                            ui.label(L::sub(format!("되찾기 {}", self.reclaim.hits)));
                         });
                     }
                 });
@@ -443,7 +440,7 @@ impl KeenPin {
                         for (i, g) in self.groups.iter().enumerate() {
                             if g.has_keep {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("\u{1F512}").size(L::FT_BODY));
+                                    dot(ui, L::OK);
                                     ui.label(L::head(&g.name, L::OK).size(L::FT_BODY));
                                     ui.label(L::sub("유지 대상"));
                                 });
@@ -458,20 +455,23 @@ impl KeenPin {
                                 if g.keys.len() > 1 {
                                     ui.label(L::sub(format!("{}창", g.keys.len())));
                                 }
-                                if g.applied > 0 {
+                                let state = if g.applied > 0 {
+                                    Some(Ok(()))
+                                } else if g.selected {
+                                    Some(Err(g
+                                        .reason
+                                        .clone()
+                                        .unwrap_or_else(|| "적용 대기 중".to_owned())))
+                                } else {
+                                    None
+                                };
+                                if let Some(st) = state {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.colored_label(
-                                                L::OK,
-                                                egui::RichText::new("\u{2713}").size(L::FT_BODY),
-                                            )
-                                        },
+                                        |ui| status_mark(ui, st.as_ref().err().map(|s| s.as_str())),
                                     );
                                 }
-                            })
-                            .response
-                            .on_hover_text(&g.sample);
+                            });
                         }
                     });
             });
@@ -565,17 +565,6 @@ impl eframe::App for KeenPin {
         if let Ok(t) = self.tray.as_mut() {
             t.reflect(self.actually_locked);
         }
-        if self.icon_state != Some(self.actually_locked) {
-            self.icon_state = Some(self.actually_locked);
-            let b = icon::badge(self.actually_locked, 64);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
-                egui::IconData {
-                    rgba: b.px,
-                    width: b.w,
-                    height: b.h,
-                },
-            ))));
-        }
 
         ctx.request_repaint_after(Duration::from_millis(80));
     }
@@ -659,17 +648,9 @@ impl eframe::App for KeenPin {
 pub fn run() -> eframe::Result {
     let hk = Hotkeys::new().expect("global hotkey 등록 실패");
 
-    let b = icon::badge(false, 64);
-    let window_icon = egui::IconData {
-        rgba: b.px,
-        width: b.w,
-        height: b.h,
-    };
-
     let vp = egui::ViewportBuilder::default()
         .with_title("keenpin")
         .with_app_id("keenpin")
-        .with_icon(Arc::new(window_icon))
         .with_inner_size([L::W, L::H_EXPANDED])
         .with_min_inner_size([L::W, L::H_COLLAPSED])
         .with_decorations(false)
@@ -740,4 +721,44 @@ fn icon_button(ui: &mut egui::Ui, g: Glyph, tip: &str) -> egui::Response {
         }
     }
     resp.on_hover_text(tip)
+}
+
+/// 상태 점. 폰트 글리프에 의존하지 않는다.
+fn dot(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.2, color);
+}
+
+/// 적용 여부 표시. 실패면 이유를 툴팁으로 보여준다.
+fn status_mark(ui: &mut egui::Ui, fail: Option<&str>) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+
+    if fail.is_none() {
+        let s = egui::Stroke::new(1.7, L::OK);
+        p.line_segment(
+            [
+                egui::pos2(c.x - 3.6, c.y + 0.2),
+                egui::pos2(c.x - 1.1, c.y + 2.8),
+            ],
+            s,
+        );
+        p.line_segment(
+            [
+                egui::pos2(c.x - 1.1, c.y + 2.8),
+                egui::pos2(c.x + 3.6, c.y - 2.8),
+            ],
+            s,
+        );
+        resp.on_hover_text("적용됨");
+    } else {
+        p.circle_filled(c, 5.0, L::WARN);
+        p.line_segment(
+            [egui::pos2(c.x, c.y - 2.4), egui::pos2(c.x, c.y + 0.6)],
+            egui::Stroke::new(1.5, L::BG),
+        );
+        p.circle_filled(egui::pos2(c.x, c.y + 2.6), 0.9, L::BG);
+        resp.on_hover_text(format!("적용 실패 — {}", fail.unwrap_or("원인 불명")));
+    }
 }

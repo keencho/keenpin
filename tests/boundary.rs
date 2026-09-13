@@ -4,7 +4,6 @@
 use std::fs;
 use std::path::Path;
 
-/// 다른 프로세스에 영향을 줄 수 있는 API. 하나라도 쓰이면 실패.
 const FORBIDDEN: &[(&str, &str)] = &[
     ("SendInput", "입력 합성"),
     ("keybd_event", "입력 합성"),

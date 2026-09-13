@@ -4,6 +4,7 @@
 //!
 //! 아이콘은 src/icon.rs 를 그대로 써서 그린다. 그림이 한 곳에만 있도록.
 
+#[allow(dead_code)]
 mod icon {
     include!("src/icon.rs");
 }
@@ -23,6 +24,31 @@ fn main() {
         res.set_icon(path.to_str().unwrap());
         res.set("FileDescription", "keenpin");
         res.set("ProductName", "keenpin");
+
+        // 관리자 권한으로 실행되지 않으면 UIPI 때문에 더 높은 권한으로 도는 앱의
+        // 창에 SetWindowLongPtrW 가 조용히 실패한다. 매니페스트로 고정한다.
+        // exe 속성에서 체크하는 방식과 달리 재빌드해도 유지된다.
+        // 디버그 빌드에는 넣지 않는다. 매니페스트가 테스트 바이너리에도 붙어서
+        // cargo test 가 권한 상승을 요구하게 되기 때문이다.
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            res.set_manifest(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>"#,
+        );
+        }
         if let Err(e) = res.compile() {
             println!("cargo:warning=아이콘 리소스 임베드 실패: {e}");
         }
@@ -30,7 +56,7 @@ fn main() {
 }
 
 fn ico() -> Vec<u8> {
-    const SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+    const SIZES: [u32; 6] = [16, 24, 32, 48, 64, 128];
 
     let images: Vec<(u32, Vec<u8>)> = SIZES.iter().map(|s| (*s, dib(&badge(true, *s)))).collect();
 

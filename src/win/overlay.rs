@@ -1,12 +1,14 @@
-//! 작업표시줄 버튼에 상태 배지를 올린다.
-//!
-//! 작업표시줄에 고정된 앱은 창 아이콘(`WM_SETICON`)이 아니라 고정 항목의 아이콘을 쓴다.
-//! 그래서 상태를 아이콘 자체로 표현할 수 없다. Windows 가 이런 용도로 제공하는 것이
-//! `ITaskbarList3::SetOverlayIcon` 이고, 본 아이콘은 그대로 둔 채 우하단에 작은 배지를 얹는다.
-//!
-//! 대상은 항상 keenpin 자신의 창이다 (Tier A).
+// 작업표시줄 버튼에 상태 배지를 올린다.
+//
+// 본 아이콘은 exe 리소스에 박힌 정적 아이콘으로 고정한다.
+// 작업표시줄에 고정하면 Windows 가 그 아이콘만 쓰고 WM_SETICON 을 무시하는데,
+// 고정 여부에 따라 다르게 보이는 것보다 항상 같게 두는 편이 낫다.
+// 상태는 ITaskbarList3::SetOverlayIcon 으로 얹는 배지로만 표시한다.
+//
+// 대상은 항상 keenpin 자신의 창이다 (Tier A).
 
 use crate::icon;
+use crate::icon::Rgba;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
@@ -18,7 +20,6 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO};
 use windows::core::PCWSTR;
-
 const BADGE: u32 = 16;
 
 pub struct Overlay {
@@ -78,13 +79,16 @@ impl Drop for Overlay {
 
 /// RGBA 픽셀에서 HICON 을 만든다. 32bpp 알파를 그대로 쓰므로 마스크는 비워 둔다.
 fn make_icon(locked: bool) -> Option<HICON> {
-    let img = icon::badge(locked, BADGE);
+    icon_from(&icon::dot(locked, BADGE))
+}
+
+fn icon_from(img: &Rgba) -> Option<HICON> {
     let head = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: BADGE as i32,
+            biWidth: img.w as i32,
             // 음수면 위에서 아래로. 우리 픽셀 순서와 맞는다.
-            biHeight: -(BADGE as i32),
+            biHeight: -(img.h as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -101,12 +105,12 @@ fn make_icon(locked: bool) -> Option<HICON> {
             return None;
         }
 
-        let dst = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (BADGE * BADGE * 4) as usize);
+        let dst = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (img.w * img.h * 4) as usize);
         for (d, s) in dst.chunks_exact_mut(4).zip(img.px.chunks_exact(4)) {
             d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
         }
 
-        let mask: HBITMAP = CreateBitmap(BADGE as i32, BADGE as i32, 1, 1, None);
+        let mask: HBITMAP = CreateBitmap(img.w as i32, img.w as i32, 1, 1, None);
         let info = ICONINFO {
             fIcon: true.into(),
             hbmColor: color,

@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
+use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, SetLastError, TRUE, WIN32_ERROR};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetWindow, GetWindowLongPtrW,
@@ -51,6 +51,8 @@ pub struct WindowInfo {
 }
 
 struct Entry {
+    /// 우리가 세운 것만 해제 시 되돌린다.
+    ours: bool,
     original: u32,
     title: String,
 }
@@ -129,6 +131,7 @@ fn desired(cur: u32) -> u32 {
 
 pub struct Passive {
     applied: HashMap<isize, Entry>,
+    failures: HashMap<isize, String>,
     /// 사용자가 체크한 창. 세션 한정.
     selected: HashSet<isize>,
     /// 다음 실행에서 같은 종류의 창을 자동 체크해 주기 위한 힌트.
@@ -147,6 +150,7 @@ impl Passive {
 
         let mut p = Self {
             applied: HashMap::new(),
+            failures: HashMap::new(),
             selected: HashSet::new(),
             remembered: HashSet::new(),
             keep: None,
@@ -200,6 +204,7 @@ impl Passive {
             windows: self
                 .applied
                 .iter()
+                .filter(|(_, e)| e.ours)
                 .map(|(k, e)| (k.to_string(), e.original))
                 .collect(),
         };
@@ -270,11 +275,11 @@ impl Passive {
 
         self.applied.retain(|k, e| {
             let h = hwnd_of(*k);
-            let cur = ex_of(h);
-            if cur == 0 || !alive(h) {
+            if !alive(h) || !readable(h) {
                 return false;
             }
-            if cur & WS_EX_NOACTIVATE.0 == 0 {
+            let cur = ex_of(h);
+            if e.ours && cur & WS_EX_NOACTIVATE.0 == 0 {
                 unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, desired(cur) as isize) };
             }
             if e.title.is_empty() {
@@ -282,6 +287,8 @@ impl Passive {
             }
             true
         });
+
+        self.failures.retain(|k, _| alive(hwnd_of(*k)));
 
         let wanted: Vec<isize> = self.selected.iter().copied().collect();
         for key in wanted {
@@ -293,15 +300,33 @@ impl Passive {
                 self.selected.remove(&key);
                 continue;
             }
-            if let Some(original) = make_passive(h) {
-                self.applied.insert(
-                    key,
-                    Entry {
-                        original,
-                        title: title_of(h),
-                    },
-                );
-                changed = true;
+            match try_passive(h) {
+                Ok(Applied::Ours(original)) => {
+                    self.applied.insert(
+                        key,
+                        Entry {
+                            original,
+                            ours: true,
+                            title: title_of(h),
+                        },
+                    );
+                    self.failures.remove(&key);
+                    changed = true;
+                }
+                Ok(Applied::Already) => {
+                    self.applied.insert(
+                        key,
+                        Entry {
+                            original: 0,
+                            ours: false,
+                            title: title_of(h),
+                        },
+                    );
+                    self.failures.remove(&key);
+                }
+                Err(why) => {
+                    self.failures.insert(key, why);
+                }
             }
         }
 
@@ -312,8 +337,11 @@ impl Passive {
 
     pub fn release(&mut self) {
         for (k, e) in self.applied.drain() {
-            restore_one(hwnd_of(k), e.original);
+            if e.ours {
+                restore_one(hwnd_of(k), e.original);
+            }
         }
+        self.failures.clear();
         self.keep = None;
         self.persist(None);
     }
@@ -325,18 +353,47 @@ impl Drop for Passive {
     }
 }
 
-/// 성공 시 변경 전 확장 스타일을 돌려준다. 이미 세워져 있거나 실패면 None.
-fn make_passive(hwnd: HWND) -> Option<u32> {
-    let cur = ex_of(hwnd);
-    if cur == 0 || cur & WS_EX_NOACTIVATE.0 != 0 {
-        return None;
+/// 적용 결과. 실패 이유를 문자열로 남겨 UI 가 추측 없이 보여줄 수 있게 한다.
+enum Applied {
+    /// 우리가 세웠다. 해제 시 original 로 되돌린다.
+    Ours(u32),
+    /// 이미 켜져 있었다. 우리가 만든 상태가 아니므로 해제 시 건드리지 않는다.
+    Already,
+}
+
+fn try_passive(hwnd: HWND) -> Result<Applied, String> {
+    if !readable(hwnd) {
+        let code = unsafe { GetLastError().0 };
+        return Err(match code {
+            5 => "창 접근 거부 (오류 5)".into(),
+            0 => "창 핸들이 유효하지 않음".into(),
+            n => format!("창 읽기 실패 (오류 {n})"),
+        });
     }
-    unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired(cur) as isize) };
-    (ex_of(hwnd) & WS_EX_NOACTIVATE.0 != 0).then_some(cur)
+    let cur = ex_of(hwnd);
+    if cur & WS_EX_NOACTIVATE.0 != 0 {
+        return Ok(Applied::Already);
+    }
+
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired(cur) as isize);
+    }
+
+    if ex_of(hwnd) & WS_EX_NOACTIVATE.0 != 0 {
+        return Ok(Applied::Ours(cur));
+    }
+
+    let code = unsafe { GetLastError().0 };
+    Err(match code {
+        5 => "접근 거부 — 대상이 더 높은 권한으로 실행 중".into(),
+        0 => "설정 직후 앱이 되돌림".into(),
+        n => format!("SetWindowLongPtrW 실패 (오류 {n})"),
+    })
 }
 
 fn restore_one(hwnd: HWND, original: u32) {
-    if !alive(hwnd) || ex_of(hwnd) == 0 {
+    if !alive(hwnd) || !readable(hwnd) {
         return;
     }
     unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original as isize) };
@@ -367,7 +424,8 @@ pub struct AppGroup {
     pub applied: usize,
     pub selected: bool,
     pub has_keep: bool,
-    pub sample: String,
+    /// 적용에 실패한 경우의 이유. 추측하지 않고 GetLastError 기반으로 채운다.
+    pub reason: Option<String>,
 }
 
 impl Passive {
@@ -385,12 +443,15 @@ impl Passive {
                 applied: 0,
                 selected: false,
                 has_keep: false,
-                sample: w.title.clone(),
+                reason: None,
             });
             g.keys.push(w.key);
             g.applied += usize::from(w.applied);
             g.selected |= w.selected;
             g.has_keep |= w.is_keep;
+            if g.reason.is_none() {
+                g.reason = self.failures.get(&w.key).cloned();
+            }
         }
 
         let mut v: Vec<_> = by_key.into_values().collect();
@@ -409,6 +470,7 @@ impl Passive {
             self.remembered.remove(&g.key);
             for k in &g.keys {
                 self.selected.remove(k);
+                self.failures.remove(k);
                 if let Some(e) = self.applied.remove(k) {
                     restore_one(hwnd_of(*k), e.original);
                 }
@@ -431,5 +493,14 @@ impl Passive {
                 self.selected.insert(k);
             }
         }
+    }
+}
+
+/// 핸들 유효성 확인. 실제 창은 WS_VISIBLE 등이 있어 GWL_STYLE 이 0 일 수 없다.
+/// 확장 스타일(GWL_EXSTYLE)은 0 이 정상값이므로 이 판정에 쓰면 안 된다.
+fn readable(hwnd: HWND) -> bool {
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+        GetWindowLongPtrW(hwnd, GWL_STYLE) != 0
     }
 }

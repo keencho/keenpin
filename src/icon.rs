@@ -90,3 +90,37 @@ pub fn badge(locked: bool, size: u32) -> Rgba {
         h: size,
     }
 }
+
+/// 작업표시줄 오버레이 배지. 본 아이콘 위에 겹치므로 형태를 단순하게 둔다.
+/// 어두운 테두리를 둘러 밝은 아이콘 위에서도 구분되게 한다.
+pub fn dot(locked: bool, size: u32) -> Rgba {
+    let s = size as f32;
+    let u = s / 16.0;
+    let aa = 1.0_f32.max(u * 0.9);
+    let accent = if locked { LOCKED } else { RELEASED };
+    let c = (s - 1.0) / 2.0;
+
+    let mut px = vec![0u8; (size * size * 4) as usize];
+
+    for y in 0..size {
+        for x in 0..size {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let mut p = [0.0f32; 4];
+
+            over(&mut p, SHELL, cov(sd_circle(fx, fy, c, c, 7.4 * u), aa));
+            over(&mut p, accent, cov(sd_circle(fx, fy, c, c, 5.6 * u), aa));
+
+            let i = ((y * size + x) * 4) as usize;
+            px[i] = (p[0] * 255.0) as u8;
+            px[i + 1] = (p[1] * 255.0) as u8;
+            px[i + 2] = (p[2] * 255.0) as u8;
+            px[i + 3] = (p[3] * 255.0) as u8;
+        }
+    }
+
+    Rgba {
+        px,
+        w: size,
+        h: size,
+    }
+}
