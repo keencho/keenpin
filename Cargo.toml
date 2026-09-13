@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.36.2"
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.36.2"
 global-hotkey = "0.8.0"
 raw-window-handle = "0.6.2"
