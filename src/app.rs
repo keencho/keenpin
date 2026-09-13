@@ -1,6 +1,7 @@
 use crate::hotkey::{Action, Hotkeys, TOGGLE_LABEL, VISIBLE_LABEL};
 use crate::layout as L;
 use crate::tray::{Tray, TrayAction};
+use crate::win::overlay::Overlay;
 use crate::win::passive::{AppGroup, Passive};
 use crate::win::reclaim::{self, Reclaim, State};
 use crate::win::{drag, focus, geom, noactivate};
@@ -20,6 +21,7 @@ enum Grab {
 pub struct KeenPin {
     hk: Hotkeys,
     tray: Result<Tray, String>,
+    overlay: Overlay,
     passive: Passive,
     reclaim: Reclaim,
     hwnd: Option<HWND>,
@@ -49,6 +51,7 @@ impl KeenPin {
         Self {
             hk,
             tray: Tray::new(),
+            overlay: Overlay::new(),
             passive,
             reclaim: Reclaim::new(),
             hwnd: None,
@@ -558,6 +561,7 @@ impl eframe::App for KeenPin {
             }
         }
 
+        self.overlay.reflect(hwnd, self.actually_locked);
         if let Ok(t) = self.tray.as_mut() {
             t.reflect(self.actually_locked);
         }
